@@ -11,6 +11,7 @@ trainEmbed.json
 validationEmbed.json
 testEmbed.json
 *.npz
+*.pt
 glove*.txt
 glove*.zip
 *.npy
