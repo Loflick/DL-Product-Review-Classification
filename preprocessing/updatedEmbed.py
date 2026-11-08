@@ -7,13 +7,15 @@ import torch
 from tqdm import tqdm
 
 
-TRAIN_INPUT = "trainReviews.jsonl"
-VALIDATION_INPUT = "validationReviews.jsonl"
-TEST_INPUT = "trainReviews.jsonl"
+ROOT = Path(__file__).resolve().parents[1]
 
-TRAIN_EMBED = "train_embeddings.pt" 
-VALIDATION_EMBED = "validation_embeddings.pt"
-TEST_EMBED = "test_embeddings.pt"
+TRAIN_INPUT = ROOT / "trainReviews.json"
+VALIDATION_INPUT = ROOT / "validationReviews.json"
+TEST_INPUT = ROOT / "testReviews.json"
+
+TRAIN_EMBED = ROOT / "train_embeddings.pt"
+VALIDATION_EMBED = ROOT / "validation_embeddings.pt"
+TEST_EMBED = ROOT / "test_embeddings.pt"
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 MAX_REVIEWS_PER_PRODUCT = 10 
