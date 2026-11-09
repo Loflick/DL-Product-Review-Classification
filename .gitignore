@@ -12,6 +12,7 @@ validationEmbed.json
 testEmbed.json
 *.npz
 *.pt
+*.jsonl
 glove*.txt
 glove*.zip
 *.npy
