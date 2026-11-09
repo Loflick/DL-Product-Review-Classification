@@ -4,33 +4,33 @@ import json
 import sys
 from pathlib import Path
 import numpy as np
+import torch
 from sklearn.metrics import cohen_kappa_score, f1_score
 from tensorflow.keras.utils import set_random_seed
-from tqdm import tqdm
-from MLP import DEFAULT_CONFIG, EMBED_DIM, MLP, NUM_CLASSES
+from MLP import DEFAULT_CONFIG, MLP, NUM_CLASSES
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from preprocessing.readGloveTest import loadData
-from preprocessing.gloveEmbedTest import (
-    CATEGORIES,
-    TRAIN_ITEMS_OUTPUT,
-    VALIDATION_ITEMS_OUTPUT,
-    TEST_ITEMS_OUTPUT,
-    TRAIN_EMBED_OUTPUT,
-    VALIDATION_EMBED_OUTPUT,
-    TEST_EMBED_OUTPUT,
-)
-
 SEED = 42
 CLASSES = list(range(NUM_CLASSES))
 
-# Data splits: (items file, embeddings)
+
+def items_path(split):
+    """Finds the items file (.jsonl or .json)."""
+    for ext in (".jsonl", ".json"):
+        path = ROOT / f"{split}Items{ext}"
+        if path.exists():
+            return path
+
+    raise FileNotFoundError(f"No {split}Items file in {ROOT}")
+
+
+# Data splits: (items file, embeddings file)
 SPLITS = {
-    "train": (ROOT / TRAIN_ITEMS_OUTPUT, ROOT / TRAIN_EMBED_OUTPUT),
-    "validation": (ROOT / VALIDATION_ITEMS_OUTPUT, ROOT / VALIDATION_EMBED_OUTPUT),
-    "test": (ROOT / TEST_ITEMS_OUTPUT, ROOT / TEST_EMBED_OUTPUT),
+    "train": (items_path("train"), ROOT / "train_embeddings.pt"),
+    "validation": (items_path("validation"), ROOT / "validation_embeddings.pt"),
+    "test": (items_path("test"), ROOT / "test_embeddings.pt"),
 }
 
 
@@ -56,45 +56,25 @@ def load_labels(items_path):
 
 
 def load_split(split):
-    """Average each item's word embeddings into one vector."""
+    """Average each item's review embeddings into one vector."""
     items_file, embed_file = SPLITS[split]
-    cache = ROOT / f"mlp_pooled_{split}.npz"
 
-    # Init data from cache
-    if cache.exists():
-        data = np.load(cache)
-        return data["X"], data["y"]
-
-    # Init item ratings
+    # Init item ratings and embeddings
     labels = load_labels(items_file)
+    embeddings = torch.load(embed_file)
     x, y = [], []
 
-    for category in CATEGORIES:
-        items = loadData.stream_category(embed_file, category)
+    for asin, reviews in embeddings.items():
+        if asin not in labels or len(reviews) == 0:
+            continue
 
-        # Pool each item's reviews into one vector
-        for asin, reviews in tqdm(items, desc=f"{split} {category}", unit="item"):
-            if asin not in labels or len(reviews) == 0:
-                continue
-
-            total = np.zeros(EMBED_DIM, dtype=np.float32)
-            words = 0
-
-            # Pool all reviews
-            for review in reviews:
-                total += review.sum(axis=0)
-                words += len(review)
-
-            # x = (1 / W) * sum(e_j), e_j = word embedding, W = words
-            x.append(total / words)
-            y.append(labels[asin])
+        # x = (1 / R) * sum(r_j), r_j = review embedding, R = reviews
+        x.append(reviews.mean(dim=0).numpy())
+        y.append(labels[asin])
 
     # Convert to numpy arrays
     x = np.asarray(x, dtype=np.float32)
     y = np.asarray(y, dtype=np.int64)
-
-    # Save to cache
-    np.savez(cache, X=x, y=y)
 
     return x, y
 
@@ -180,6 +160,7 @@ def main(config=DEFAULT_CONFIG):
         hidden_sizes=config["hidden_sizes"],
         activation=config["activation"],
         learning_rate=config["learning_rate"],
+        dropout=config["dropout"],
     )
     # Fit MLP
     model.fit(
