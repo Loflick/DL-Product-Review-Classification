@@ -1,11 +1,11 @@
 """MLP Model for Review Classification"""
 
 import numpy as np
-from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.optimizers import Adam
 
-EMBED_DIM = 300
+EMBED_DIM = 384
 NUM_CLASSES = 5
 
 # Default experiment vars
@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
     "hidden_sizes": (256, 128),
     "activation": "relu",
     "learning_rate": 1e-3,
+    "dropout": 0.3,
     "batch_size": 256,
     "epochs": 10,
     "weight_power": 0.5,
@@ -27,6 +28,7 @@ class MLP:
         hidden_sizes=(256, 128),
         activation="relu",
         learning_rate=1e-3,
+        dropout=0.3,
         embed_dim=EMBED_DIM,
         num_classes=NUM_CLASSES,
     ):
@@ -34,6 +36,7 @@ class MLP:
         self.hidden_sizes = hidden_sizes
         self.activation = activation
         self.learning_rate = learning_rate
+        self.dropout = dropout
         self.embed_dim = embed_dim
         self.num_classes = num_classes
 
@@ -51,6 +54,9 @@ class MLP:
         # ReLU: f(z) = max(0, z)
         for n, size in enumerate(self.hidden_sizes, start=1):
             model.add(Dense(size, activation=self.activation, name=f"hidden_{n}"))
+
+            # Dropout: randomly zero values while training
+            model.add(Dropout(self.dropout, name=f"dropout_{n}"))
 
         # Output layer
         # Softmax: y_hat_i = e^(z_i) / sum_j(e^(z_j))
