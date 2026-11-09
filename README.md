@@ -13,7 +13,7 @@ You also need `sentence-transformers` (`pip install sentence-transformers`). Run
 ```
 python preprocessing/downloadData.py
 ```
-This streams items and reviews from Hugging Face. It takes a long time (likely hours) and needs internet. It empties its output files when it starts, so let it finish.
+This downloads items and reviews from Hugging Face. It empties its output files when it starts, so let it finish.
 
 What it does:
 1. Picks items from each of 5 categories (Electronics, Books, Clothing_Shoes_and_Jewelry, Beauty_and_Personal_Care, Home_and_Kitchen). Only items with at least 50 ratings are kept.
@@ -24,7 +24,7 @@ What it does:
 ```
 python preprocessing/updatedEmbed.py
 ```
-This embeds each review with `all-MiniLM-L6-v2` and saves one file per split. A GPU makes this much faster.
+This embeds each review with `all-MiniLM-L6-v2` and saves one file per split.
 
 ### Generated files
 | Split | Items | Reviews | Embeddings |
