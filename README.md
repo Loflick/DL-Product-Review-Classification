@@ -68,3 +68,4 @@ for category in CATEGORIES:
 |---|---|
 | MLP | `models/MLP/` (`MLP.py` is the model, `runMLP.py` runs the pipeline) |
 | Transformer | `models/transformer/` |
+| CNN | `models/CNN/` (`CNN.py` is the model, `trainCNN.py` runs the pipeline and trains the model)
