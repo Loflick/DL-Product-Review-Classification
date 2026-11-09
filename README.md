@@ -40,8 +40,6 @@ File formats:
 - `*Reviews.jsonl`: JSON lines, with `title`, `text`, `category`, `parent_asin`. There is no per-review rating; look up the item's rating by `parent_asin`.
 - `*_minilm_embeddings.pt`: a dict saved with `torch.save`, mapping `parent_asin` to a float32 tensor of shape `(n_reviews, 384)` with `n_reviews` up to 10. The vectors are L2-normalized. Items without usable reviews are not in the dict.
 
-Class balance is very skewed toward 4-5 stars. The proposal's counts were roughly 1% / 1.4% / 10% / 56% / 31% for classes 0-4. Plan for this when training and when picking metrics.
-
 ## Using the embedded data in a model
 Models live in `models/<name>/`. Load a split's embeddings and its labels like this:
 ```python
@@ -56,7 +54,6 @@ with open("trainItems.jsonl", encoding="utf-8") as f:
         item = json.loads(line)
         labels[item["parent_asin"]] = min(max(round(item["rating"]) - 1, 0), 4)
 ```
-Run model scripts from the repo root so these relative paths resolve (`models/MLP/runMLP.py` builds its paths from the repo root and works from anywhere).
 
 ## Models
 | Model | Folder |
@@ -65,5 +62,3 @@ Run model scripts from the repo root so these relative paths resolve (`models/ML
 | Transformer | `models/transformer/` |
 | CNN | `models/CNN/` (`CNN.py` is the model, `trainCNN.py` runs the pipeline and trains the model) |
 
-### MLP
-Follows the proposal: review embeddings → two hidden layers (256, 128) applied to each review → self-attention across the item's reviews → average pooling to 1D → softmax output with cross-entropy loss. Class weights handle the class imbalance, early stopping on validation QWK limits overfitting, and `RUN_SEARCH = True` in `runMLP.py` turns on the random hyperparameter search. It reports MAE, off-by-1 accuracy, macro-F1 and quadratic weighted kappa.
