@@ -1,137 +1,161 @@
-"""Runs the MLP pipeline: loads the pre-split data, trains, validates, tests."""
+"""Runs MLP training and testing."""
 
 import json
-import sys
-from pathlib import Path
+import random
 import numpy as np
 import torch
 from sklearn.metrics import cohen_kappa_score, f1_score
-from tensorflow.keras.utils import set_random_seed
-from MLP import DEFAULT_CONFIG, MLP, NUM_CLASSES
-
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.append(str(ROOT))
-
-SEED = 42
-CLASSES = list(range(NUM_CLASSES))
+from sklearn.model_selection import ParameterGrid
+from MLP import EMBED_DIM, MAX_REVIEWS, MLP, NUM_CLASSES
 
 
-def items_path(split):
-    """Finds the items file (.jsonl or .json)."""
-    for ext in (".jsonl", ".json"):
-        path = ROOT / f"{split}Items{ext}"
-        if path.exists():
-            return path
+TRAIN_EMBED_PATH = "train_minilm_embeddings.pt"
+VAL_EMBED_PATH = "validation_minilm_embeddings.pt"
+TEST_EMBED_PATH = "test_minilm_embeddings.pt"
 
-    raise FileNotFoundError(f"No {split}Items file in {ROOT}")
+TRAIN_ITEMS_PATH = "trainItems.jsonl"
+VAL_ITEMS_PATH = "validationItems.jsonl"
+TEST_ITEMS_PATH = "testItems.jsonl"
 
-
-# Data splits: (items file, embeddings file)
-SPLITS = {
-    "train": (items_path("train"), ROOT / "train_embeddings.pt"),
-    "validation": (items_path("validation"), ROOT / "validation_embeddings.pt"),
-    "test": (items_path("test"), ROOT / "test_embeddings.pt"),
-}
+MODEL_SAVE_PATH = "mlp_minilm.pth"
 
 
-def load_labels(items_path):
-    """Maps each item to its rating."""
-    text = Path(items_path).read_text(encoding="utf-8")
-    decoder = json.JSONDecoder()
+def to_class(rating):
+    """Rating to class."""
+    # Round rating stars
+    stars = round(rating)
 
+    # 0-4 classes
+    label = stars - 1
+
+    # Set range bounds
+    if label < 0:
+        label = 0
+    if label > NUM_CLASSES - 1:
+        label = NUM_CLASSES - 1
+
+    return label
+
+
+def load_labels(path):
+    """Load item labels for classes."""
     labels = {}
-    pos = 0
 
-    # Parses JSON objects
-    while True:
-        while pos < len(text) and text[pos].isspace():
-            pos += 1
-        if pos >= len(text):
-            break
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
 
-        item, pos = decoder.raw_decode(text, pos)
-        labels[item["parent_asin"]] = item["rating"]
+            item = json.loads(line)
+            asin = item["parent_asin"]
+            labels[asin] = to_class(item["rating"])
 
     return labels
 
 
-def load_split(split):
-    """Average each item's review embeddings into one vector."""
-    items_file, embed_file = SPLITS[split]
+def load_data(items_path, embed_path):
+    """Load reviews per item."""
+    labels = load_labels(items_path)
+    embeds = torch.load(embed_path)
 
-    # Init item ratings and embeddings
-    labels = load_labels(items_file)
-    embeddings = torch.load(embed_file)
-    x, y = [], []
+    # Zero-padded arrays
+    x = np.zeros((len(labels), MAX_REVIEWS, EMBED_DIM), dtype=np.float32)
+    y = np.zeros(len(labels), dtype=np.int64)
+    row = 0
 
-    for asin, reviews in embeddings.items():
+    # One row per item
+    for asin, reviews in embeds.items():
         if asin not in labels or len(reviews) == 0:
             continue
 
-        # x = (1 / R) * sum(r_j), r_j = review embedding, R = reviews
-        x.append(reviews.mean(dim=0).numpy())
-        y.append(labels[asin])
+        num = min(len(reviews), MAX_REVIEWS)
+        x[row, :num] = reviews[:num].numpy()
+        y[row] = labels[asin]
+        row += 1
 
-    # Convert to numpy arrays
-    x = np.asarray(x, dtype=np.float32)
-    y = np.asarray(y, dtype=np.int64)
-
-    return x, y
+    # Drop unused rows
+    return x[:row], y[:row]
 
 
-def class_weights(ratings, power=1.0):
-    """Give rarer classes larger loss weights, so they are not ignored."""
+def class_weights(y, power=0.5):
+    """Adjusts class weighting."""
     # Count items per class
-    counts = np.bincount(np.asarray(ratings), minlength=NUM_CLASSES)
+    counts = np.bincount(y, minlength=NUM_CLASSES)
     counts = counts.astype(np.float32)
 
-    # Rarer classes have higher weight
-    # w_c = (1 / n_c)^p
+    # w = (1 / n)^p
     weights = (1.0 / (counts + 1e-5)) ** power
 
-    # Normalize: sum(w_c) = C
+    # Scale to sum C
     weights = weights / weights.sum() * NUM_CLASSES
 
-    result = {}
-
-    # Maps class id to weight
-    for i, weight in enumerate(weights):
-        result[i] = float(weight)
-
-    return result
+    return weights.tolist()
 
 
 def compute_metrics(y_true, y_pred):
-    """Compute QWK, macro-F1, MAE, and off-by-1 accuracy."""
-    # Error per item: |y - y_hat|
+    """Computes evaluation metrics."""
+    classes = list(range(NUM_CLASSES))
+
+    # error = |y - y_hat|
     error = np.abs(y_true - y_pred)
 
-    # QWK = 1 - sum(w_ij * O_ij) / sum(w_ij * E_ij), w_ij = (i - j)^2
-    qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic", labels=CLASSES)
+    # Quadratic weighted kappa
+    qwk = cohen_kappa_score(y_true, y_pred, weights="quadratic", labels=classes)
 
-    # Macro-F1 = (1 / C) * sum(F1_c), F1_c = 2PR / (P + R)
-    f1 = f1_score(y_true, y_pred, average="macro", labels=CLASSES, zero_division=0)
+    # Macro-averaged F1
+    f1 = f1_score(y_true, y_pred, average="macro", labels=classes, zero_division=0)
 
-    # MAE = (1 / n) * sum(|y - y_hat|)
+    # MAE = mean(error)
     mae = float(error.mean())
 
-    # Off-by-1 = (1 / n) * count(|y - y_hat| <= 1)
+    # Off-by-1 = mean(error <= 1)
     off_by_1 = float((error <= 1).mean())
 
-    return {
-        "qwk": qwk,
-        "macro_f1": f1,
-        "mae": mae,
-        "off_by_1_accuracy": off_by_1,
-    }
+    return {"qwk": qwk, "macro_f1": f1, "mae": mae, "off_by_1_accuracy": off_by_1}
 
 
-def print_results(y_true, y_pred):
-    """Print the final test results."""
-    metrics = compute_metrics(y_true, y_pred)
+def build_model(layer_count):
+    """Builds the MLP."""
+    sizes = (256, 128, 64)
+    hidden = sizes[:layer_count]
+
+    return MLP(hidden=hidden)
+
+
+def train(lr, weight_d, layer_count, batch_size):
+    """Trains the MLP."""
+    x_train, y_train = load_data(TRAIN_ITEMS_PATH, TRAIN_EMBED_PATH)
+    x_val, y_val = load_data(VAL_ITEMS_PATH, VAL_EMBED_PATH)
+
+    model = build_model(layer_count)
+    weights = class_weights(y_train)
+
+    model.fit(
+        x_train, y_train,
+        x_val, y_val,
+        lr, weight_d, batch_size,
+        weights, MODEL_SAVE_PATH,
+    )
+
+
+def evaluate(lr, weight_d, layer_count, batch_size):
+    """Print test results."""
+    x, y = load_data(TEST_ITEMS_PATH, TEST_EMBED_PATH)
+
+    model = build_model(layer_count)
+    model.load(MODEL_SAVE_PATH)
+
+    y_pred = model.predict(x)
+    metrics = compute_metrics(y, y_pred)
+
+    classes = list(range(NUM_CLASSES))
+    f1_each = f1_score(y, y_pred, average=None, labels=classes, zero_division=0)
+    print("F1 per class:", f1_each.round(3))
 
     print("\n" + "=" * 35)
     print("        FINAL TEST RESULTS        ")
+    print("For values ", lr, " ", weight_d, " ", layer_count, " ", batch_size)
     print("=" * 35)
     print(f"Total Test Items:        {len(y_pred)}")
     print(f"Mean Absolute Error:     {metrics['mae']:.4f}")
@@ -141,44 +165,39 @@ def print_results(y_true, y_pred):
     print("=" * 35)
 
 
-def main(config=DEFAULT_CONFIG):
-    """Train the MLP and report results."""
-    # Fix seed
-    set_random_seed(SEED)
-
-    # Init train, val, test
-    x_train, y_train = load_split("train")
-    x_val, y_val = load_split("validation")
-    x_test, y_test = load_split("test")
-
-    # Compute class weights
-    ratings = list(load_labels(SPLITS["train"][0]).values())
-    weights = class_weights(ratings, config["weight_power"])
-
-    # Build MLP
-    model = MLP(
-        hidden_sizes=config["hidden_sizes"],
-        activation=config["activation"],
-        learning_rate=config["learning_rate"],
-        dropout=config["dropout"],
-    )
-    # Fit MLP
-    model.fit(
-        x_train, y_train,
-        x_val, y_val,
-        batch_size=config["batch_size"],
-        epochs=config["epochs"],
-        class_weight=weights,
-    )
-
-    # Run on val set
-    val_pred = model.predict(x_val)
-    print("val", compute_metrics(y_val, val_pred))
-
-    # Run test set
-    test_pred = model.predict(x_test)
-    print_results(y_test, test_pred)
-
-
 if __name__ == "__main__":
-    main()
+    # Fix random seed
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    # Search space
+    param_grid = {
+        "lr": [0.0003, 0.001, 0.003],
+        "weight_decay": [0.0, 0.0001],
+        "num_layers": [1, 2, 3],
+        "batch_size": [128, 256, 512],
+    }
+
+    # Single run
+    param_grid = {
+        "lr": [0.001],
+        "weight_decay": [0.0001],
+        "num_layers": [2],
+        "batch_size": [256],
+    }
+
+    # Random search trials
+    trials = None
+
+    combos = list(ParameterGrid(param_grid))
+    if trials:
+        combos = random.Random(42).sample(combos, trials)
+
+    for params in combos:
+        lr = params["lr"]
+        weight_d = params["weight_decay"]
+        layer_count = params["num_layers"]
+        batch_size = params["batch_size"]
+
+        train(lr, weight_d, layer_count, batch_size)
+        evaluate(lr, weight_d, layer_count, batch_size)

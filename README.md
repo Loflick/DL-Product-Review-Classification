@@ -31,13 +31,12 @@ This embeds each review with `all-MiniLM-L6-v2` and saves one file per split.
 |---|---|---|---|
 | Train | `trainItems.jsonl` | `trainReviews.jsonl` | `train_minilm_embeddings.pt` |
 | Validation | `validationItems.jsonl` | `validationReviews.jsonl` | `validation_minilm_embeddings.pt` |
-| Test | `testItems.json` | `testReviews.jsonl` | `test_minilm_embeddings.pt` |
+| Test | `testItems.jsonl` | `testReviews.jsonl` | `test_minilm_embeddings.pt` |
 
 All of these are git-ignored. Each person generates them locally.
 
 File formats:
-- `*Items`: JSON lines (one object per line), with `title`, `category`, `rating`, `rating_number`, `parent_asin`. `rating` is the item's **average rating as a float from 1.0 to 5.0**, not a class. Convert it to a class 0-4 with `clamp(round(rating) - 1, 0, 4)`. (`testItems.json` has a `.json` extension but is the same JSON-lines format.)
-- `*Reviews.jsonl`: JSON lines, with `title`, `text`, `category`, `parent_asin`. There is no per-review rating; look up the item's rating by `parent_asin`.
+- `*Items`: JSON lines (one object per line), with `title`, `category`, `rating`, `rating_number`, `parent_asin`. `rating` is the item's **average rating as a float from 1.0 to 5.0**, not a class. Convert it to a class 0-4 with `clamp(round(rating) - 1, 0, 4)`.- `*Reviews.jsonl`: JSON lines, with `title`, `text`, `category`, `parent_asin`. There is no per-review rating; look up the item's rating by `parent_asin`.
 - `*_minilm_embeddings.pt`: a dict saved with `torch.save`, mapping `parent_asin` to a float32 tensor of shape `(n_reviews, 384)` with `n_reviews` up to 10. The vectors are L2-normalized. Items without usable reviews are not in the dict.
 
 ## Using the embedded data in a model
