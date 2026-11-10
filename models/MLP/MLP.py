@@ -1,91 +1,139 @@
 """MLP Model for Review Classification"""
 
 import numpy as np
-from tensorflow.keras.layers import Dense, Dropout, Input
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adam
+import torch
+import torch.nn as nn
+from sklearn.metrics import cohen_kappa_score
 
 EMBED_DIM = 384
+MAX_REVIEWS = 10
+NUM_HEADS = 4
 NUM_CLASSES = 5
 
-# Default experiment vars
-DEFAULT_CONFIG = {
-    "hidden_sizes": (256, 128),
-    "activation": "relu",
-    "learning_rate": 1e-3,
-    "dropout": 0.3,
-    "batch_size": 256,
-    "epochs": 10,
-    "weight_power": 0.5,
-}
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+class MLP(nn.Module):
+    """MLP with self-attention."""
 
-class MLP:
-    """MLP: input, hidden layers, output."""
+    def __init__(self, hidden=(256, 128)):
+        super().__init__()
 
-    def __init__(
-        self,
-        hidden_sizes=(256, 128),
-        activation="relu",
-        learning_rate=1e-3,
-        dropout=0.3,
-        embed_dim=EMBED_DIM,
-        num_classes=NUM_CLASSES,
-    ):
-        # Init model hyperparameters
-        self.hidden_sizes = hidden_sizes
-        self.activation = activation
-        self.learning_rate = learning_rate
-        self.dropout = dropout
-        self.embed_dim = embed_dim
-        self.num_classes = num_classes
+        # Hidden layers, per review
+        layers = []
+        in_size = EMBED_DIM
 
-        self.model = self.build()
+        for out_size in hidden:
+            layers.append(nn.Linear(in_size, out_size))
+            layers.append(nn.ReLU())
+            in_size = out_size
 
-    def build(self):
-        """Builds the MLP model."""
-        model = Sequential(name="mlp")
+        self.hidden = nn.Sequential(*layers)
 
-        # Input layer
-        model.add(Input(shape=(self.embed_dim,), name="input"))
-
-        # Hidden layers
-        # z = sum(w_i * x_i) + b
-        # ReLU: f(z) = max(0, z)
-        for n, size in enumerate(self.hidden_sizes, start=1):
-            model.add(Dense(size, activation=self.activation, name=f"hidden_{n}"))
-
-            # Dropout: randomly zero values while training
-            model.add(Dropout(self.dropout, name=f"dropout_{n}"))
+        # Self-attention across reviews
+        self.attention = nn.MultiheadAttention(in_size, NUM_HEADS, batch_first=True)
+        self.norm = nn.LayerNorm(in_size)
 
         # Output layer
-        # Softmax: y_hat_i = e^(z_i) / sum_j(e^(z_j))
-        model.add(Dense(self.num_classes, activation="softmax", name="output"))
+        self.output = nn.Linear(in_size, NUM_CLASSES)
 
-        # Optimizer and loss
-        # L = -(1 / N) * sum(log(y_hat_i))
-        # Gradient step: w = w - eta * dL/dw
-        model.compile(
-            optimizer=Adam(learning_rate=self.learning_rate),
-            loss="sparse_categorical_crossentropy",
-            metrics=["accuracy"],
-        )
+        self.to(device)
 
-        return model
+    def forward(self, x):
+        """Compute class scores."""
+        # Mask
+        mask = x.abs().sum(dim=-1) != 0
 
-    def fit(self, x_train, y_train, x_val, y_val, batch_size=256, epochs=10, class_weight=None):
-        """Train, validating after each epoch."""
-        history = self.model.fit(
-            x_train, y_train,
-            validation_data=(x_val, y_val),
-            batch_size=batch_size,
-            epochs=epochs,
-            class_weight=class_weight,
-        )
+        # Avoid empty items
+        mask[:, 0] = True
 
-        return history
+        x = self.hidden(x)
+
+        # Normalize
+        attn_out, _ = self.attention(x, x, x, key_padding_mask=~mask)
+        x = x + attn_out
+        x = self.norm(x)
+
+        # Condense to 1D
+        # mean = sum(h) / R
+        mask = mask.unsqueeze(-1).float()
+        x = (x * mask).sum(dim=1)
+        x = x / mask.sum(dim=1)
+
+        return self.output(x)
+
+    def fit(self, x_train, y_train, x_val, y_val, lr, decay, batch_size, weights, path):
+        """Train with early stopping."""
+        x_train = torch.from_numpy(x_train)
+        y_train = torch.from_numpy(y_train)
+
+        # Weighted cross-entropy loss
+        weights = torch.tensor(weights, dtype=torch.float32, device=device)
+        loss_fn = nn.CrossEntropyLoss(weight=weights)
+
+        # Optimizer
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=decay)
+
+        classes = list(range(NUM_CLASSES))
+        best_qwk = -1.0
+        bad_epochs = 0
+
+        for epoch in range(30):
+            self.train()
+
+            # Shuffle each epoch
+            order = torch.randperm(len(x_train))
+
+            # Loop over batches
+            for start in range(0, len(order), batch_size):
+                rows = order[start:start + batch_size]
+                batch_x = x_train[rows].to(device)
+                batch_y = y_train[rows].to(device)
+
+                scores = self(batch_x)
+                loss = loss_fn(scores, batch_y)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            # Check validation
+            pred = self.predict(x_val)
+            mae = np.abs(y_val - pred).mean()
+            qwk = cohen_kappa_score(y_val, pred, weights="quadratic", labels=classes)
+            print(f"Epoch {epoch + 1} | Val MAE: {mae:.4f} | Val QWK: {qwk:.4f}")
+
+            # Stopping
+            if qwk > best_qwk:
+                best_qwk = qwk
+                bad_epochs = 0
+                torch.save(self.state_dict(), path)
+            else:
+                bad_epochs += 1
+
+            if bad_epochs >= 4:
+                break
+
+        # Restore best weights
+        self.load(path)
 
     def predict(self, x):
-        """Return the predicted class for each item."""
-        probs = self.model.predict(x, batch_size=1024, verbose=0)
-        return np.argmax(probs, axis=1)
+        """Predict classes."""
+        self.eval()
+        preds = []
+
+        with torch.no_grad():
+            # Predict in chunks
+            for start in range(0, len(x), 1024):
+                batch = torch.from_numpy(x[start:start + 1024])
+                batch = batch.to(device)
+
+                scores = self(batch)
+                pred = scores.argmax(dim=1)
+                preds.append(pred.cpu().numpy())
+
+        return np.concatenate(preds)
+
+    def load(self, path):
+        """Load weights."""
+        weights = torch.load(path, map_location=device)
+        self.load_state_dict(weights)
