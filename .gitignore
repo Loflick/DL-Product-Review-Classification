@@ -1,4 +1,7 @@
 *.jsonl
+*.json
+*.npy
+*.npz
 *.pt
 *.pth
 *.h5

@@ -1,13 +1,13 @@
 # Deep Learning & Product Review Classifcation
 Deep Learning Approaches to Product Review Classification using MLP, CNN, LSTM, Transformers
 
-Each model reads Amazon product reviews, embedded with MiniLM, and predicts the item's rating class (0-4, meaning 1-5 stars).
+Each model reads Amazon product reviews, embedded with BGE plus a sentiment model, and predicts the item's rating class (0-4, meaning 1-5 stars).
 
 - Dataset: https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023
-- Embeddings: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2 (384 dimensions, one vector per review)
+- Embeddings: https://huggingface.co/BAAI/bge-base-en-v1.5 (768 dimensions) and https://huggingface.co/nlptown/bert-base-multilingual-uncased-sentiment (5 sentiment scores), 773 dimensions per review
 
 ## Setup
-You also need `sentence-transformers` (`pip install sentence-transformers`). Run everything from the **repo root**, because the scripts write their output files to the folder you run them from.
+You also need `sentence-transformers` and `transformers` (`pip install sentence-transformers transformers`). Run everything from the **repo root**, because the scripts write their output files to the folder you run them from.
 
 ### 1. Download and split the data
 ```
@@ -24,40 +24,40 @@ What it does:
 ```
 python preprocessing/updatedEmbed.py
 ```
-This embeds each review with `all-MiniLM-L6-v2` and saves one file per split.
+This embeds each review (title and text) with `bge-base-en-v1.5` and the sentiment model, and saves two files per split.
+
+`downloadData.py` writes the test items as `testItems.json`, but `updatedEmbed.py` reads `testItems.jsonl`. Rename the file to `testItems.jsonl` before running step 2.
 
 ### Generated files
-| Split | Items | Reviews | Embeddings |
-|---|---|---|---|
-| Train | `trainItems.jsonl` | `trainReviews.jsonl` | `train_minilm_embeddings.pt` |
-| Validation | `validationItems.jsonl` | `validationReviews.jsonl` | `validation_minilm_embeddings.pt` |
-| Test | `testItems.jsonl` | `testReviews.jsonl` | `test_minilm_embeddings.pt` |
+| Split | Items | Reviews | Embeddings | Metadata |
+|---|---|---|---|---|
+| Train | `trainItems.jsonl` | `trainReviews.jsonl` | `train_embeds.npy` | `train_meta.npz` |
+| Validation | `validationItems.jsonl` | `validationReviews.jsonl` | `validation_embeds.npy` | `validation_meta.npz` |
+| Test | `testItems.jsonl` | `testReviews.jsonl` | `test_embeds.npy` | `test_meta.npz` |
 
 All of these are git-ignored. Each person generates them locally.
 
 File formats:
-- `*Items`: JSON lines (one object per line), with `title`, `category`, `rating`, `rating_number`, `parent_asin`. `rating` is the item's **average rating as a float from 1.0 to 5.0**, not a class. Convert it to a class 0-4 with `clamp(round(rating) - 1, 0, 4)`.- `*Reviews.jsonl`: JSON lines, with `title`, `text`, `category`, `parent_asin`. There is no per-review rating; look up the item's rating by `parent_asin`.
-- `*_minilm_embeddings.pt`: a dict saved with `torch.save`, mapping `parent_asin` to a float32 tensor of shape `(n_reviews, 384)` with `n_reviews` up to 10. The vectors are L2-normalized. Items without usable reviews are not in the dict.
+- `*Items`: JSON lines (one object per line), with `title`, `category`, `rating`, `rating_number`, `parent_asin`. `rating` is the item's **average rating as a float from 1.0 to 5.0**, not a class. Convert it to a class 0-4 with `clamp(round(rating) - 1, 0, 4)`.
+- `*Reviews.jsonl`: JSON lines, with `title`, `text`, `category`, `parent_asin`. There is no per-review rating; look up the item's rating by `parent_asin`.
+- `*_embeds.npy`: a float16 array of shape `(n_items, 10, 773)`. Each item has up to 10 review vectors (768 BGE values followed by 5 sentiment scores), zero-padded if there are fewer.
+- `*_meta.npz`: `asins` (the `parent_asin` of each row), `counts` (reviews per item), `targets` (the item's float average rating, 1.0 to 5.0), `embed_dim` and `max_reviews`. Row `i` of the `.npy` file belongs to `asins[i]`. Only items with at least one review are included.
 
 ## Using the embedded data in a model
 Models live in `models/<name>/`. Load a split's embeddings and its labels like this:
 ```python
-import json
-import torch
+import numpy as np
 
-embeddings = torch.load("train_minilm_embeddings.pt")   # {parent_asin: (n_reviews, 384)}
-
-labels = {}
-with open("trainItems.jsonl", encoding="utf-8") as f:
-    for line in f:
-        item = json.loads(line)
-        labels[item["parent_asin"]] = min(max(round(item["rating"]) - 1, 0), 4)
+embeds = np.load("train_embeds.npy")          # (n_items, 10, 773)
+meta = np.load("train_meta.npz")
+ratings = meta["targets"]                     # float rating per item
+classes = np.clip(np.round(ratings) - 1, 0, 4).astype(int)
 ```
 
 ## Models
 | Model | Folder |
 |---|---|
-| MLP | `models/MLP/` (`MLP.py` is the model, `runMLP.py` runs the pipeline: `python models/MLP/runMLP.py`) |
+| MLP | `models/MLP/` (`MLP.py` is the model, `runMLP.py` loads the `.npy` and `.npz` files, trains, tunes the class cutoffs on validation, and tests: `python models/MLP/runMLP.py`) |
 | Transformer | `models/transformer/` |
 | CNN | `models/CNN/` (`CNN.py` is the model, `trainCNN.py` runs the pipeline and trains the model) |
 
