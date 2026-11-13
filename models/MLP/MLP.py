@@ -72,14 +72,13 @@ class MLP(nn.Module):
 
         return self.output(x)
 
-    def fit(self, x_train, y_train, x_val, y_val, lr, decay, batch_size, epochs, weights, path):
+    def fit(self, x_train, y_train, x_val, y_val, lr, decay, batch_size, epochs, path):
         """Train with early stopping."""
         x_train = torch.from_numpy(x_train)
         y_train = torch.from_numpy(y_train)
 
-        # Weighted cross-entropy loss
-        weights = torch.tensor(weights, dtype=torch.float32, device=device)
-        loss_fn = nn.CrossEntropyLoss(weight=weights)
+        # Cross-entropy loss
+        loss_fn = nn.CrossEntropyLoss()
 
         # Optimizer
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=decay)
