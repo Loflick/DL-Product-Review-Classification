@@ -57,7 +57,7 @@ classes = np.clip(np.round(ratings) - 1, 0, 4).astype(int)
 ## Models
 | Model | Folder |
 |---|---|
-| MLP | `models/MLP/` (`MLP.py` is the model, `runMLP.py` loads the `.npy` and `.npz` files, trains, tunes the class cutoffs on validation, and tests: `python models/MLP/runMLP.py`) |
+| MLP | `models/MLP/` (`MLP.py` is the model, `runMLP.py` runs the pipeline and trains the model) |
 | Transformer | `models/transformer/` |
 | CNN | `models/CNN/` (`CNN.py` is the model, `trainCNN.py` runs the pipeline and trains the model) |
 
