@@ -1,16 +1,23 @@
 """MLP Model for Review Classification"""
 
+import math
+
 import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import cohen_kappa_score
 
-EMBED_DIM = 384
-MAX_REVIEWS = 10
-NUM_HEADS = 4
+EMBED_DIM = 773
 NUM_CLASSES = 5
+CLASSES = list(range(NUM_CLASSES))
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def compute_qwk(y_true, y_pred):
+    """Quadratic weighted kappa."""
+    return cohen_kappa_score(y_true, y_pred, weights="quadratic", labels=CLASSES)
+
 
 class MLP(nn.Module):
     """MLP with self-attention."""
@@ -30,7 +37,9 @@ class MLP(nn.Module):
         self.hidden = nn.Sequential(*layers)
 
         # Self-attention across reviews
-        self.attention = nn.MultiheadAttention(in_size, NUM_HEADS, batch_first=True)
+        self.query = nn.Linear(in_size, in_size)
+        self.key = nn.Linear(in_size, in_size)
+        self.value = nn.Linear(in_size, in_size)
         self.norm = nn.LayerNorm(in_size)
 
         # Output layer
@@ -40,28 +49,30 @@ class MLP(nn.Module):
 
     def forward(self, x):
         """Compute class scores."""
-        # Mask
-        mask = x.abs().sum(dim=-1) != 0
-
-        # Avoid empty items
-        mask[:, 0] = True
-
+        x = x.float()
         x = self.hidden(x)
 
+        # Attention = softmax(Q * K^T / sqrt(d)) * V
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
+
+        scores = q @ k.transpose(1, 2)
+        scores = scores / math.sqrt(x.size(-1))
+
+        weights = torch.softmax(scores, dim=-1)
+        attn_out = weights @ v
+
         # Normalize
-        attn_out, _ = self.attention(x, x, x, key_padding_mask=~mask)
         x = x + attn_out
         x = self.norm(x)
 
         # Condense to 1D
-        # mean = sum(h) / R
-        mask = mask.unsqueeze(-1).float()
-        x = (x * mask).sum(dim=1)
-        x = x / mask.sum(dim=1)
+        x = x.mean(dim=1)
 
         return self.output(x)
 
-    def fit(self, x_train, y_train, x_val, y_val, lr, decay, batch_size, weights, path):
+    def fit(self, x_train, y_train, x_val, y_val, lr, decay, batch_size, epochs, weights, path):
         """Train with early stopping."""
         x_train = torch.from_numpy(x_train)
         y_train = torch.from_numpy(y_train)
@@ -73,11 +84,10 @@ class MLP(nn.Module):
         # Optimizer
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=decay)
 
-        classes = list(range(NUM_CLASSES))
         best_qwk = -1.0
         bad_epochs = 0
 
-        for epoch in range(30):
+        for epoch in range(epochs):
             self.train()
 
             # Shuffle each epoch
@@ -85,7 +95,9 @@ class MLP(nn.Module):
 
             # Loop over batches
             for start in range(0, len(order), batch_size):
-                rows = order[start:start + batch_size]
+                end = start + batch_size
+                rows = order[start:end]
+
                 batch_x = x_train[rows].to(device)
                 batch_y = y_train[rows].to(device)
 
@@ -97,10 +109,9 @@ class MLP(nn.Module):
                 optimizer.step()
 
             # Check validation
-            pred = self.predict(x_val)
-            mae = np.abs(y_val - pred).mean()
-            qwk = cohen_kappa_score(y_val, pred, weights="quadratic", labels=classes)
-            print(f"Epoch {epoch + 1} | Val MAE: {mae:.4f} | Val QWK: {qwk:.4f}")
+            pred = np.rint(self.predict(x_val)).astype(int)
+            qwk = compute_qwk(y_val, pred)
+            print(f"Epoch {epoch + 1} | Val QWK: {qwk:.4f}")
 
             # Stopping
             if qwk > best_qwk:
@@ -117,21 +128,26 @@ class MLP(nn.Module):
         self.load(path)
 
     def predict(self, x):
-        """Predict classes."""
+        """Predict class value."""
         self.eval()
-        preds = []
+        all_values = []
+        classes = torch.arange(NUM_CLASSES, device=device)
 
         with torch.no_grad():
             # Predict in chunks
             for start in range(0, len(x), 1024):
-                batch = torch.from_numpy(x[start:start + 1024])
+                end = start + 1024
+                batch = torch.from_numpy(x[start:end])
                 batch = batch.to(device)
 
                 scores = self(batch)
-                pred = scores.argmax(dim=1)
-                preds.append(pred.cpu().numpy())
+                probs = torch.softmax(scores, dim=1)
 
-        return np.concatenate(preds)
+                # value = sum(p * c)
+                values = (probs * classes).sum(dim=1)
+                all_values.append(values.cpu().numpy())
+
+        return np.concatenate(all_values)
 
     def load(self, path):
         """Load weights."""
