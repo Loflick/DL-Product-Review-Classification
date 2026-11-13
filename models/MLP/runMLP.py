@@ -52,25 +52,6 @@ def load_data(embed_path, meta_path):
     return x, y, targets
 
 
-def class_weights(y, power):
-    """Adjusts class weighting."""
-    # Count items per class
-    counts = np.bincount(y, minlength=NUM_CLASSES)
-    counts = counts.astype(np.float32)
-
-    # w = (1 / n)^p
-    counts = counts + 1e-5
-    weights = 1.0 / counts
-    weights = weights ** power
-
-    # Scale to sum C
-    total = weights.sum()
-    weights = weights / total
-    weights = weights * NUM_CLASSES
-
-    return weights.tolist()
-
-
 def compute_metrics(y_true, y_pred):
     """Computes evaluation metrics."""
     # error = |y - y_hat|
@@ -106,13 +87,12 @@ def train(params):
     x_val, y_val, _ = load_data(VAL_EMBED_PATH, VAL_META_PATH)
 
     model = build_model(params)
-    weights = class_weights(y_train, params["weight_power"])
 
     model.fit(
         x_train, y_train,
         x_val, y_val,
         params["lr"], params["weight_decay"], params["batch_size"], params["epochs"],
-        weights, MODEL_SAVE_PATH,
+        MODEL_SAVE_PATH,
     )
 
 
@@ -194,7 +174,6 @@ if __name__ == "__main__":
         "lr": [0.0003, 0.001, 0.003],
         "num_layers": [1, 2, 3],
         "weight_decay": [0.0001, 0.001, 0.02],
-        "weight_power": [0.0, 0.5, 1.0],
     }
 
     # Single run
@@ -204,7 +183,6 @@ if __name__ == "__main__":
         "lr": [0.0003],
         "num_layers": [2],
         "weight_decay": [0.02],
-        "weight_power": [0.0],
     }
 
     # Random search trials
