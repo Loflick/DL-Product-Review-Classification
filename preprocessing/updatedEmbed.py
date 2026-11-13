@@ -2,88 +2,151 @@ import collections
 import json
 import os
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
-import torch
-from tqdm import tqdm
 
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+import numpy as np
+import torch
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 
-TRAIN_INPUT = ROOT / "trainReviews.jsonl"
-VALIDATION_INPUT = ROOT / "validationReviews.jsonl"
-TEST_INPUT = ROOT / "testReviews.jsonl"
+SPLITS = [
+    ("train", ROOT / "trainReviews.jsonl", ROOT / "trainItems.jsonl"),
+    ("validation", ROOT / "validationReviews.jsonl", ROOT / "validationItems.jsonl"),
+    ("test", ROOT / "testReviews.jsonl", ROOT / "testItems.jsonl"),
+]
 
-TRAIN_EMBED = ROOT / "train_minilm_embeddings.pt"
-VALIDATION_EMBED = ROOT / "validation_minilm_embeddings.pt"
-TEST_EMBED = ROOT / "test_minilm_embeddings.pt"
+BGE_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+SENT_MODEL_NAME = "nlptown/bert-base-multilingual-uncased-sentiment"
 
-MODEL_NAME = "all-MiniLM-L6-v2"
-MAX_REVIEWS_PER_PRODUCT = 10 
-BATCH_SIZE = 256 
+MAX_REVIEWS_PER_PRODUCT = 10
+MAX_CHARS = 2000
+MAX_SEQ_LEN = 256   
+BATCH_SIZE = 256    
+CHUNK_ITEMS = 5000  
+
+ASIN_KEY = "parent_asin"
+TEXT_KEY = "text"
+TITLE_KEY = "title"
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-ASIN_KEY = "parent_asin"  
-TEXT_KEY = "text" 
-TITLE_KEY = "title" 
 
-def load_and_group_reviews(jsonl_path, max_reviews=10, asin_key="parent_asin", text_key="text"):
-    print(f"Reading JSONL from: {jsonl_path}")
+def load_labels(items_path):
+    labels = {}
+    with open(items_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            asin = data.get("parent_asin") or data.get("asin")
+            rating = data.get("rating")
+            if asin and rating is not None:
+                labels[asin] = float(rating)
+    return labels
+
+def load_and_group_reviews(reviews_path, valid_asins, max_reviews=10):
+    print(f"\nReading JSONL from: {reviews_path}")
     product_reviews = collections.defaultdict(list)
 
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in tqdm(f, desc="Reading reviews"):
+    with open(reviews_path, "r", encoding="utf-8") as f:
+        for line in tqdm(f, desc="Grouping reviews"):
             line = line.strip()
             if not line:
                 continue
 
             data = json.loads(line)
-            asin = data.get(asin_key)
-            if not asin:
+            asin = data.get(ASIN_KEY) or data.get("asin")
+            if not asin or asin not in valid_asins or len(product_reviews[asin]) >= max_reviews:
                 continue
 
-            if len(product_reviews[asin]) >= max_reviews:
-                continue
+            title = (data.get(TITLE_KEY) or "").strip()
+            body = (data.get(TEXT_KEY) or "").strip()
+            text = f"{title}. {body}".strip(". ") if title and body else (body or title)
 
-            text = data.get(text_key, "")
-            if not text and TITLE_KEY in data:
-                text = data.get(TITLE_KEY, "")
-
-            text = text.strip()
             if text:
-                product_reviews[asin].append(text)
+                product_reviews[asin].append(text[:MAX_CHARS])
 
-    print(f"Found {len(product_reviews)} unique products.")
+    print(f"Found {len(product_reviews)} unique products with reviews.")
     return product_reviews
 
+def encode_and_save(split_name, product_reviews, labels, bge_model, sent_tok, sent_model):
+    npy_path = ROOT / f"{split_name}_embeds.npy"
+    meta_path = ROOT / f"{split_name}_meta.npz"
 
-def encode_and_save(product_reviews, output_path):
-    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    asins = list(product_reviews.keys())
+    num_items = len(asins)
+    embed_dim = 768 + 5
 
-    all_texts = []
-    product_index_map = ({})
-    current_idx = 0
-    for asin, texts in product_reviews.items():
-        all_texts.extend(texts)
-        product_index_map[asin] = (current_idx, current_idx + len(texts))
-        current_idx += len(texts)
+    counts = np.array([len(product_reviews[a]) for a in asins], dtype=np.int32)
+    targets = np.array([labels[a] for a in asins], dtype=np.float32)
 
-    embeddings = model.encode(all_texts,batch_size=BATCH_SIZE,show_progress_bar=True,convert_to_tensor=True,  normalize_embeddings=True,  )
+    embeds_mm = np.lib.format.open_memmap(npy_path,mode="w+",dtype=np.float16,shape=(num_items, MAX_REVIEWS_PER_PRODUCT, embed_dim),)
 
-    final_dict = {}
-    for asin, (start, end) in product_index_map.items():
-        final_dict[asin] = embeddings[start:end].cpu().to(torch.float32)
+    for start in tqdm(range(0, num_items, CHUNK_ITEMS), desc=f"Encoding {split_name} on {DEVICE}"):
+        end = min(start + CHUNK_ITEMS, num_items)
+        chunk_texts = []
+        chunk_slices = []
+        cursor = 0
 
-    torch.save(final_dict, output_path)
-    print(f"File size: {os.path.getsize(output_path) / (1024**2):.2f} MB")
+        for idx in range(start, end):
+            texts = product_reviews[asins[idx]]
+            chunk_texts.extend(texts)
+            chunk_slices.append((idx, cursor, cursor + len(texts)))
+            cursor += len(texts)
+
+        if not chunk_texts:
+            continue
+
+        order = np.argsort([len(t) for t in chunk_texts], kind="mergesort")
+        sorted_texts = [chunk_texts[i] for i in order]
+
+        with torch.inference_mode():
+            bge_vecs_sorted = bge_model.encode(sorted_texts,batch_size=BATCH_SIZE,show_progress_bar=False,convert_to_numpy=True,normalize_embeddings=True,)
+
+            sent_probs_list = []
+            for s in range(0, len(sorted_texts), BATCH_SIZE):
+                batch_t = sorted_texts[s : s + BATCH_SIZE]
+                enc = sent_tok(batch_t,padding=True,truncation=True,max_length=MAX_SEQ_LEN,return_tensors="pt",).to(DEVICE)
+                logits = sent_model(**enc).logits
+                probs = torch.softmax(logits.float(), dim=-1)
+                sent_probs_list.append(probs.cpu().numpy())
+
+        sent_vecs_sorted = np.concatenate(sent_probs_list, axis=0)
+
+        combined = np.empty((len(chunk_texts), embed_dim), dtype=np.float16)
+        combined[order] = np.concatenate([bge_vecs_sorted, sent_vecs_sorted], axis=1).astype(np.float16)
+
+        for item_idx, c_start, c_end in chunk_slices:
+            n = c_end - c_start
+            embeds_mm[item_idx, :n, :] = combined[c_start:c_end]
+            if n < MAX_REVIEWS_PER_PRODUCT:
+                embeds_mm[item_idx, n:, :] = 0.0
+
+    embeds_mm.flush()
+    np.savez(meta_path,asins=np.array(asins),counts=counts,targets=targets,embed_dim=embed_dim,max_reviews=MAX_REVIEWS_PER_PRODUCT,)
+
+    size_mb = os.path.getsize(npy_path) / (1024**2)
+    print(f"Saved {npy_path.name} ({size_mb:.2f} MB) | Items: {num_items} | Shape: ({num_items}, {MAX_REVIEWS_PER_PRODUCT}, {embed_dim})")
 
 
 if __name__ == "__main__":
-    print("DOING TRAIN")
-    reviews_by_product = load_and_group_reviews(TRAIN_INPUT, max_reviews=MAX_REVIEWS_PER_PRODUCT, asin_key=ASIN_KEY)
-    encode_and_save(reviews_by_product, TRAIN_EMBED)
-    print("DOING VALIDATION")
-    reviews_by_product = load_and_group_reviews(VALIDATION_INPUT, max_reviews=MAX_REVIEWS_PER_PRODUCT, asin_key=ASIN_KEY)
-    encode_and_save(reviews_by_product, VALIDATION_EMBED)
-    print("DOING TEST")
-    reviews_by_product = load_and_group_reviews(TEST_INPUT, max_reviews=MAX_REVIEWS_PER_PRODUCT, asin_key=ASIN_KEY)
-    encode_and_save(reviews_by_product, TEST_EMBED)
+    print(f"Loading {BGE_MODEL_NAME} and {SENT_MODEL_NAME} on {DEVICE}...")
+    bge_model = SentenceTransformer(BGE_MODEL_NAME, device=DEVICE)
+    bge_model.max_seq_length = MAX_SEQ_LEN
+    sent_tok = AutoTokenizer.from_pretrained(SENT_MODEL_NAME)
+    sent_model = AutoModelForSequenceClassification.from_pretrained(SENT_MODEL_NAME).to(DEVICE).eval()
+
+    if DEVICE == "cuda":
+        bge_model.half()
+        sent_model.half()
+
+    for split_name, rev_path, items_path in SPLITS:
+        print(f"\n--- PROCESSING {split_name.upper()} ---")
+        labels = load_labels(items_path)
+        reviews_by_product = load_and_group_reviews(rev_path, labels, max_reviews=MAX_REVIEWS_PER_PRODUCT)
+        encode_and_save(split_name, reviews_by_product, labels, bge_model, sent_tok, sent_model)
