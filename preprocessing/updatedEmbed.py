@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPLITS = [
     ("train", ROOT / "trainReviews.jsonl", ROOT / "trainItems.jsonl"),
     ("validation", ROOT / "validationReviews.jsonl", ROOT / "validationItems.jsonl"),
-    ("test", ROOT / "testReviews.jsonl", ROOT / "testItems.jsonl"),
+    ("test", ROOT / "testReviews.jsonl", ROOT / "testItems.json"),
 ]
 
 BGE_MODEL_NAME = "BAAI/bge-base-en-v1.5"
