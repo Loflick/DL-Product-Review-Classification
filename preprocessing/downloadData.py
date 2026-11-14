@@ -69,116 +69,31 @@ TRAIN_EMBED_OUTPUT = "trainEmbed.jsonl"
 VALIDATION_EMBED_OUTPUT = "validationEmbed.jsonl"
 TEST_EMBED_OUTPUT = "testEmbed.jsonl"
 
-class extractData:
-    def extractValidItemsForCategory(category):
-        target_items = CATEGORIES[category]["target_items"]
-        url = f"https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023/resolve/main/raw/meta_categories/meta_{category}.jsonl"
-
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-
-        itemCount = 0
-
-        pbar = tqdm(total=target_items, unit="reviews")
-
-        with open(ITEMS_OUTPUT, "a", encoding="utf-8") as out_r:
-            for line in response.iter_lines(chunk_size=1024 * 1024):
-                if not line: continue
-                item = json.loads(line.decode("utf-8"))
-                asin = item.get("parent_asin")
-
-                pbar.update(1)
-
-                avg_rating = item.get("average_rating")
-                if avg_rating is None:
-                    continue
-
-                item_to_save = {
-                    "title": item.get("title"),
-                    "category": category,
-                    "rating": avg_rating,
-                    "parent_asin": asin,
-                }
-                out_r.write(json.dumps(item_to_save) + "\n")
-                itemCount += 1
-
-
-                if itemCount > CATEGORIES[category]["target_items"]:
-                    break
-        pbar.close()
-
-    def extractReviewsFromValidItems(asinLookup, category):
-        target_reviews = CATEGORIES[category]["target_reviews"]
-        url = f"https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023/resolve/main/raw/review_categories/{category}.jsonl"
-
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-
-        pbar = tqdm(total=target_reviews, unit="reviews")
-
-        count = 0
-
-        with open(TRAIN_REVIEW_OUTPUT, "a", encoding="utf-8") as out_T, \
-             open(VALIDATION_REVIEW_OUTPUT, "a", encoding="utf-8") as out_V, \
-             open(TEST_REVIEW_OUTPUT, "a", encoding="utf-8") as out_Te:
-                writers = {
-                    "train": out_T,
-                    "val": out_V,
-                    "test": out_Te
-                }
-                for line in response.iter_lines(chunk_size=1024 * 1024):
-                    if not line: continue
-
-                    review = json.loads(line.decode("utf-8"))
-                    asin = review.get("parent_asin")
-
-                    split = asinLookup.get(asin)
-                    target = writers.get(split)
-
-                    if target:
-                        review_to_save = {
-                            "title": review.get("title"),
-                            "text": review.get("text"),
-                            "category": category,
-                            "parent_asin": asin,
-                        }
-                        target.write(json.dumps(review_to_save) + "\n")
-                        pbar.update(1)
-                        count += 1
-
-                    if count > target_reviews:
-                        break
-
-        pbar.close()
-
 class extractDataTest:
     @staticmethod
-    def extractValidItemsForCategory(category, min_ratings=40, oversample=1.5):
-        target_items = int(CATEGORIES[category]["target_items"] * oversample)
+    def extractValidItemsForCategory(category, min_ratings=5, max_per_bucket=5000, max_lines_scan=300_000):
         url = f"https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023/resolve/main/raw/meta_categories/meta_{category}.jsonl"
-
         response = requests.get(url, stream=True)
         response.raise_for_status()
 
-        itemCount = 0
-        pbar = tqdm(total=target_items, unit="items", desc=f"Candidates: {category}")
+        bucket_counts = collections.Counter()
+        pbar = tqdm(total=max_per_bucket * 5, unit="items", desc=f"Meta: {category}")
 
         with open(ITEMS_OUTPUT, "a", encoding="utf-8") as out_r:
-            for line in response.iter_lines(chunk_size=1024 * 1024):
+            for line_idx, line in enumerate(response.iter_lines(chunk_size=1024 * 1024), start=1):
                 if not line:
                     continue
 
                 item = json.loads(line.decode("utf-8"))
                 asin = item.get("parent_asin")
                 avg_rating = item.get("average_rating")
-                rating_number = item.get("rating_number", 0)
+                rating_number = item.get("rating_number")
 
-                if (
-                    not asin
-                    or avg_rating is None
-                    or rating_number is None
-                    or rating_number < min_ratings
-                ):
+                if not asin or avg_rating is None or rating_number is None or rating_number < min_ratings:
+                    continue
+
+                bucket = min(5, max(1, round(float(avg_rating))))
+                if bucket_counts[bucket] >= max_per_bucket:
                     continue
 
                 item_to_save = {
@@ -189,79 +104,76 @@ class extractDataTest:
                     "parent_asin": asin,
                 }
                 out_r.write(json.dumps(item_to_save) + "\n")
-                itemCount += 1
+                bucket_counts[bucket] += 1
                 pbar.update(1)
 
-                if itemCount >= target_items:
+                if all(bucket_counts[b] >= max_per_bucket for b in range(1, 6)) or line_idx >= max_lines_scan:
                     break
 
         pbar.close()
+        print(f"{category} item buckets: {dict(sorted(bucket_counts.items()))}")
 
     @staticmethod
-    def extractReviewsFromValidItems(asinLookup, category, reviews_per_item=10):
-        target_reviews = CATEGORIES[category]["target_reviews"]
+    def extractReviewsFromValidItems(asinLookup, category, reviews_per_item=10, min_reviews_per_item=1, max_lines_scan=2_000_000):
         url = f"https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023/resolve/main/raw/review_categories/{category}.jsonl"
-
         response = requests.get(url, stream=True)
         response.raise_for_status()
 
-        pbar = tqdm(total=target_reviews, unit="reviews", desc=f"Reviews: {category}")
-
         item_review_buffer = collections.defaultdict(list)
-        completed_asins = (set()) 
-        count = 0
+        completed_asins = set()
+        written_reviews = 0
+        pbar = tqdm(total=max_lines_scan, unit="lines", desc=f"Reviews: {category}")
 
-        with open(TRAIN_REVIEW_OUTPUT, "a", encoding="utf-8") as out_T,\
-            open(VALIDATION_REVIEW_OUTPUT, "a", encoding="utf-8") as out_V,\
-            open(TEST_REVIEW_OUTPUT, "a", encoding="utf-8") as out_Te :
+        with open(TRAIN_REVIEW_OUTPUT, "a", encoding="utf-8") as out_T, \
+             open(VALIDATION_REVIEW_OUTPUT, "a", encoding="utf-8") as out_V, \
+             open(TEST_REVIEW_OUTPUT, "a", encoding="utf-8") as out_Te:
 
             writers = {"train": out_T, "val": out_V, "test": out_Te}
 
-            for line in response.iter_lines(chunk_size=1024 * 1024):
+            for line_idx, line in enumerate(response.iter_lines(chunk_size=1024 * 1024), start=1):
+                pbar.update(1)
+                if line_idx > max_lines_scan:
+                    break
                 if not line:
                     continue
 
                 review = json.loads(line.decode("utf-8"))
                 asin = review.get("parent_asin")
-
-                if not asin or asin in completed_asins:
+                if not asin or asin in completed_asins or asin not in asinLookup:
                     continue
 
-                split = asinLookup.get(asin)
-                target = writers.get(split)
-                if not target:
+                text = (review.get("text") or "").strip()
+                if len(text.split()) < 3:
                     continue
 
-                text = review.get("text", "")
-                if not text or len(text.strip().split()) < 3:
-                    continue
-
-                review_to_save = {
+                item_review_buffer[asin].append({
                     "title": review.get("title", ""),
-                    "text": text.strip(),
+                    "text": text,
                     "category": category,
                     "parent_asin": asin,
-                }
-                item_review_buffer[asin].append(review_to_save)
+                })
 
                 if len(item_review_buffer[asin]) == reviews_per_item:
-                    for r in item_review_buffer[asin]:
+                    target = writers[asinLookup[asin]]
+                    for r in item_review_buffer.pop(asin):
                         target.write(json.dumps(r) + "\n")
-
                     completed_asins.add(asin)
-                    del item_review_buffer[asin]
-                    count += reviews_per_item
-                    pbar.update(reviews_per_item)
+                    written_reviews += reviews_per_item
 
-                    if count >= target_reviews:
-                        break
+            partial_items = 0
+            for asin, revs in item_review_buffer.items():
+                if len(revs) >= min_reviews_per_item and asin in asinLookup:
+                    target = writers[asinLookup[asin]]
+                    for r in revs:
+                        target.write(json.dumps(r) + "\n")
+                    written_reviews += len(revs)
+                    partial_items += 1
 
         pbar.close()
         print(
-            f"Successfully collected {len(completed_asins)} products with"
-            f" exactly {reviews_per_item} text reviews each."
+            f"{category}: {len(completed_asins)} full ({reviews_per_item}-rev) + "
+            f"{partial_items} partial items | {written_reviews} reviews written."
         )
-        return completed_asins
 
 
 def main():
@@ -283,18 +195,18 @@ def main():
     downloadNewFiles = True
 
     if downloadNewFiles:
-        for category, config in CATEGORIES.items():    
+        for category, config in CATEGORIES.items():
             print(f"Starting pipeline for {category}")
-            extractDataTest.extractValidItemsForCategory(category, 50, 1.5)
+            extractDataTest.extractValidItemsForCategory(category,min_ratings=5,max_per_bucket=5000,max_lines_scan=300_000,)
 
         with open(ITEMS_OUTPUT, "r") as out_f:
             items = [json.loads(line) for line in out_f if line.strip()]
 
         df = pd.DataFrame(items)
 
-
-        train_df, temp_df = train_test_split(df, test_size = 0.20, random_state=25269876)
-        val_df, test_df = train_test_split(temp_df, test_size = 0.50, random_state=25269876)
+        buckets = df["rating"].round().clip(1, 5).astype(int)
+        train_df, temp_df = train_test_split(df, test_size = 0.20, stratify=buckets, random_state=25269876)
+        val_df, test_df = train_test_split(temp_df, test_size = 0.50, stratify=temp_df["rating"].round().clip(1, 5).astype(int), random_state=25269876)
 
         train_df.to_json(TRAIN_ITEMS_OUTPUT, orient="records", lines=True)
         val_df.to_json(VALIDATION_ITEMS_OUTPUT, orient="records", lines=True)
@@ -313,7 +225,7 @@ def main():
 
         for category, config in CATEGORIES.items():
             print("Downloading Reviews")
-            extractDataTest.extractReviewsFromValidItems(lookup, category, 10)
+            extractDataTest.extractReviewsFromValidItems(lookup,category,reviews_per_item=10,min_reviews_per_item=1,max_lines_scan=1_000_000,)
 
 
     print("All finished")
