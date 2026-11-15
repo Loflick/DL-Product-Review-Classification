@@ -225,7 +225,7 @@ def main():
 
         for category, config in CATEGORIES.items():
             print("Downloading Reviews")
-            extractDataTest.extractReviewsFromValidItems(lookup,category,reviews_per_item=10,min_reviews_per_item=1,max_lines_scan=1_000_000,)
+            extractDataTest.extractReviewsFromValidItems(lookup,category,reviews_per_item=10,min_reviews_per_item=1,max_lines_scan=100_000_000,)
 
 
     print("All finished")
