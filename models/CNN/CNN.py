@@ -3,78 +3,116 @@
 #Additionally it was used to further knowledge of a 1D CNN
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
+import keras 
+from keras import layers 
 from dataclasses import dataclass
 
+MAX_REVIEWS = 10
+EMBED_DIM = 773 
+NUM_CLASSES = 5
 
 @dataclass
 class HParams:
-    lr: float = 1e-3          # learning rate
-    batch_size: int = 64      # reviews per weight update
-    epochs: int = 10          # max passes over the training data (early stopping may stop sooner)
-    activation: str = "relu"  # non-linearity used after the convs and in the projection layer
-    n_filters: int = 100      # filters PER kernel size (3 sizes -> 3 * n_filters total)
-    n_neurons: int = 128      # size of the projection layer
+    lr: float = 1e-3
+    batch_size: int = 128
+    epochs: int = 10
+    activation: str = 'relu'
+    n_filters: int = 100
+    n_neurons: int = 128
     dropout: float = 0.5
 
+def compute_mask(t):
+    return keras.ops.sum(keras.ops.abs(t),axis=-1) > 0
 
-ACTIVATIONS = { #different activation functions; trainCNN can select the best one in it's trials 
-    "relu": F.relu,
-    "tanh": torch.tanh,
-    "sigmoid": torch.sigmoid,
-    "gelu": F.gelu,
-}
+# # attention:
+# attn_mask = ___(mask)                              # (B, L, L)
+# attn = layers.MultiHeadAttention(...)(x, x, attention_mask=attn_mask)
+def compute_attn_mask(t):
+    return keras.ops.repeat(keras.ops.expand_dims(t,axis=1), MAX_REVIEWS, axis=1)
 
 
-class TextCNN(nn.Module):
-    """
-      GloVe vectors (B, L, 300)
-        -> 3 parallel Conv1d branches, kernel sizes 3/4/5, n_filters each   (CNN block)
-        -> self-attention across word positions        
-        -> 1D global max-pooling over positions       
-        -> projection layer (3*n_filters -> n_neurons)
-        -> linear layer -> raw logits                   
-    """
 
-    def __init__(self, num_classes, hp, embed_dim=300, kernel_sizes=(3, 4, 5)):
-        super().__init__()
-        self.act = ACTIVATIONS[hp.activation] #set the activation function 
-        self.dropout = hp.dropout #set the dropout 
+class MaskedGlobalMaxPool(layers.Layer):
+    def call(self, inputs):
+        features, mask = inputs          # (B, L, F), (B, L) bool
+        # 1. expand mask to (B, L, 1)
+        mask = keras.ops.expand_dims(mask,-1)
+        # 2. where mask is True keep features, else a very negative number
+        features = keras.ops.where(mask, features,-1e9)
+        # 3. max over the sequence axis -> (B, F)
+        return keras.ops.max(features, axis=1)
 
-        # padding="same" keeps the sequence length L, so the conv outputs can be
-        # concatenated per word position and attention has a sequence to work on.
-        self.convs = nn.ModuleList(
-            [nn.Conv1d(embed_dim, hp.n_filters, k, padding="same") for k in kernel_sizes]
-        )
 
-        features = hp.n_filters * len(kernel_sizes)          # 300 with the defaults
-        # 3 heads always divides features (features = 3 * n_filters), so any n_filters works.
-        self.attn = nn.MultiheadAttention(features, num_heads=len(kernel_sizes), batch_first=True)
-        #self attnetion allows the cnn model to view differeent relationships at once
-        self.norm = nn.LayerNorm(features)
-        #stablize and speed up neural network traning by normalizng the actigvaation 
-        #of the neurons within a single data sample rather than across a batch
 
-        self.proj = nn.Linear(features, hp.n_neurons)        # the 1 projection layer
-        self.out = nn.Linear(hp.n_neurons, num_classes)  # raw logits
 
-    def forward(self, x):                                # x: (B, L, 300) float
-        # Padding rows were zero-filled in preprocessing, so all-zero rows = padding.
-        pad = x.abs().sum(-1) == 0                       # (B, L), True where padding
-        pad[pad.all(1), 0] = False                       # never mask a whole review
+def build_model(hp, num_classes=NUM_CLASSES, kernel_sizes=(3,4,5)):
+    inputs = keras.Input(shape=(MAX_REVIEWS,EMBED_DIM))
+    # in build_model, right after `inputs`:
+    mask = keras.ops.cast(layers.Lambda(compute_mask)(inputs),"bool")      # (B, L) bool, True = real review
+    attn_mask = keras.ops.cast(layers.Lambda(compute_attn_mask)(mask),"bool")
+    # print(mask.dtype)
+    # print(attn_mask.dtype)    
+    
+    #for 3 parallel convs
+    conv_list = []
+    for k in kernel_sizes: 
+        conv_list.append(layers.Conv1D(
+            filters=hp.n_filters,
+            kernel_size= k,
+            padding = "same",
+            activation=hp.activation,
+        )(inputs))
 
-        h = x.transpose(1, 2)                            # (B, 300, L): Conv1d wants channels first
-        h = torch.cat([self.act(conv(h)) for conv in self.convs], dim=1)  # (B, F, L)
-        h = h.transpose(1, 2)                            # (B, L, F)
+    #concatentate 
+    x = layers.Concatenate(axis=-1)(conv_list)
+    
+    # step 4: MultiHeadAttention(self) -> add residual -> LayerNormalization -> THEN poo
+    # Stage 4
+    features = hp.n_filters * 3                  # what is this in terms of hp?
+    attn = layers.MultiHeadAttention(
+        num_heads=len(kernel_sizes),                                   # len(kernel_sizes)
+        key_dim= (int)(features/len(kernel_sizes)),                                     # features / heads
+        
+    )(x,x,attention_mask = attn_mask)                                          # self-attention: which tensors?
+    x = layers.Add()([x,attn])                         # residual
+    x = layers.LayerNormalization()(x)
 
-        a, _ = self.attn(h, h, h, key_padding_mask=pad, need_weights=False)
-        h = self.norm(h + a)                             # residual connection + layer norm
+    # x = layers.GlobalMaxPool1D()(x)                      # pooling now comes AFTER
+    x = MaskedGlobalMaxPool()([x,mask])
+    x = layers.Dropout(hp.dropout)(x)
+    x = layers.Dense(hp.n_neurons,activation=hp.activation)(x)
+    outputs = layers.Dense(num_classes)(x) #5 class output
 
-        # Condense to 1D: strongest value per feature across real (non-pad) positions.
-        h = h.masked_fill(pad.unsqueeze(-1), float("-inf")).max(dim=1).values  # (B, F)
 
-        h = F.dropout(h, self.dropout, self.training)
-        h = self.act(self.proj(h))                       # (B, n_neurons)
-        return self.out(h)                               # (B, num_classes)
+
+    return keras.Model(inputs,outputs)
+
+
+
+# # pooling:
+# x = MaskedGlobalMaxPool()([x, mask])
+def build_baseline(hp, num_classes=NUM_CLASSES):
+    inputs = keras.Input(shape=(MAX_REVIEWS, EMBED_DIM))               # same input as the main model
+
+    # collapse the 10 reviews into one vector per item
+    x = keras.layers.GlobalAveragePooling1D()(inputs)
+
+    x = keras.layers.Dropout(hp.dropout)(x)
+    x = keras.layers.Dense(hp.n_neurons, activation=hp.activation)(x)
+    outputs = keras.layers.Dense(5)(x)                        # raw logits, no activation
+
+    return keras.Model(inputs, outputs)
+def build_baseline_max(hp, num_classes=NUM_CLASSES):
+    inputs = keras.Input(shape=(MAX_REVIEWS, EMBED_DIM))               # same input as the main model
+
+    # collapse the 10 reviews into one vector per item
+    x = keras.layers.GlobalMaxPooling1D()(inputs)
+
+    x = keras.layers.Dropout(hp.dropout)(x)
+    x = keras.layers.Dense(hp.n_neurons, activation=hp.activation)(x)
+    outputs = keras.layers.Dense(5)(x)                        # raw logits, no activation
+
+    return keras.Model(inputs, outputs)
+
+
