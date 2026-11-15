@@ -22,7 +22,7 @@ print(f"Data ROOT: {ROOT}")
 
 NUM_WORKERS = 2 if (os.name != "nt" and IS_CUDA) else 0
 SEED = 42
-CUTOFF_F1_WEIGHT = 0.5
+CUTOFF_F1_WEIGHT = 0.8
 
 
 def set_seed(seed=SEED):
@@ -332,14 +332,14 @@ if __name__ == "__main__":
         "weight_decay": [2e-2],
         "d_model": [256],
         "num_heads": [4],
-        "num_layers": [2],
-        "num_pool_heads": [4],
-        "dropout": [0.15],
+        "num_layers": [1],
+        "num_pool_heads": [2],
+        "dropout": [0.12],
         "batch_size": [256],
         "epochs": [18],
-        "weight_power": [0.0, 0.20],
+        "weight_power": [0.0],
         "max_weight": [5.0],
-        "l1_weight": [0.25, 0.40],
+        "l1_weight": [0.30],
     }
 
     run_outputs = [
