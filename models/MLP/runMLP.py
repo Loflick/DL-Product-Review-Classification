@@ -113,7 +113,7 @@ def find_cutoffs(scores, y):
 # Training and testing
 def build_model(params):
     """Builds the MLP."""
-    sizes = (256, 128, 64)
+    sizes = (512, 256, 128)
     hidden = sizes[:params["num_layers"]]
 
     return MLP(hidden=hidden)
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     param_grid = {
         "batch_size": [256],
         "epochs": [20],
-        "lr": [0.0003],
+        "lr": [0.001],
         "num_layers": [2],
         "weight_decay": [0.02],
     }
