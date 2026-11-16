@@ -11,7 +11,7 @@ from collections import Counter
 import os
 os.environ["KERAS_BACKEND"] = "torch"
 import keras
-from CNN_jay import HParams,build_model,build_baseline,build_baseline_max
+from CNN import HParams,build_model,build_baseline,build_baseline_max
 
 ROOT = Path(__file__).resolve().parents[2]   # same as your other scripts
 MAX_REVIEWS, EMBED_DIM = 10, 773
