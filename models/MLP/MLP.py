@@ -50,6 +50,11 @@ class MLP(nn.Module):
     def forward(self, x):
         """Compute class scores."""
         x = x.float()
+
+        # Mask padded reviews
+        total = x.abs().sum(dim=-1)
+        mask = total != 0
+
         x = self.hidden(x)
 
         # Attention = softmax(Q * K^T / sqrt(d)) * V
@@ -60,6 +65,9 @@ class MLP(nn.Module):
         scores = q @ k.transpose(1, 2)
         scores = scores / math.sqrt(x.size(-1))
 
+        key_mask = mask.unsqueeze(1)
+        scores = scores.masked_fill(~key_mask, -1e9)
+
         weights = torch.softmax(scores, dim=-1)
         attn_out = weights @ v
 
@@ -68,7 +76,10 @@ class MLP(nn.Module):
         x = self.norm(x)
 
         # Condense to 1D
-        x = x.mean(dim=1)
+        review_mask = mask.unsqueeze(-1).float()
+        x = x * review_mask
+        x = x.sum(dim=1)
+        x = x / review_mask.sum(dim=1)
 
         return self.output(x)
 
