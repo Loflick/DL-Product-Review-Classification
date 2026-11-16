@@ -1,23 +1,14 @@
 """MLP Model for Review Classification"""
 
 import math
-
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import cohen_kappa_score
 
 EMBED_DIM = 773
 NUM_CLASSES = 5
-CLASSES = list(range(NUM_CLASSES))
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def compute_qwk(y_true, y_pred):
-    """Quadratic weighted kappa."""
-    return cohen_kappa_score(y_true, y_pred, weights="quadratic", labels=CLASSES)
-
 
 class MLP(nn.Module):
     """MLP with self-attention."""
@@ -83,7 +74,7 @@ class MLP(nn.Module):
 
         return self.output(x)
 
-    def fit(self, x_train, y_train, x_val, y_val, lr, decay, batch_size, epochs, path):
+    def fit(self, x_train, y_train, x_val, y_val, score_fn, lr, decay, batch_size, epochs, path):
         """Train with early stopping."""
         x_train = torch.from_numpy(x_train)
         y_train = torch.from_numpy(y_train)
@@ -120,7 +111,7 @@ class MLP(nn.Module):
 
             # Check validation
             pred = np.rint(self.predict(x_val)).astype(int)
-            qwk = compute_qwk(y_val, pred)
+            qwk = score_fn(y_val, pred)
             print(f"Epoch {epoch + 1} | Val QWK: {qwk:.4f}")
 
             # Stopping

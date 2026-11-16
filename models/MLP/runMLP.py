@@ -3,11 +3,12 @@
 import random
 import numpy as np
 import torch
-from sklearn.metrics import f1_score
+from sklearn.metrics import cohen_kappa_score, f1_score
 from scipy.optimize import minimize
 from sklearn.model_selection import ParameterGrid
-from MLP import CLASSES, MLP, NUM_CLASSES, compute_qwk
+from MLP import MLP, NUM_CLASSES
 
+CLASSES = list(range(NUM_CLASSES))
 
 TRAIN_EMBED_PATH = "train_embeds.npy"
 VAL_EMBED_PATH = "validation_embeds.npy"
@@ -20,6 +21,7 @@ TEST_META_PATH = "test_meta.npz"
 MODEL_SAVE_PATH = "mlp_bge_sent.pth"
 
 
+# Data loading
 def to_class(rating):
     """Rating to class."""
     # Round rating stars
@@ -52,6 +54,12 @@ def load_data(embed_path, meta_path):
     return x, y, targets
 
 
+# Metrics 
+def compute_qwk(y_true, y_pred):
+    """Quadratic weighted kappa."""
+    return cohen_kappa_score(y_true, y_pred, weights="quadratic", labels=CLASSES)
+
+
 def compute_metrics(y_true, y_pred):
     """Computes evaluation metrics."""
     # error = |y - y_hat|
@@ -71,29 +79,6 @@ def compute_metrics(y_true, y_pred):
         "macro_f1": f1,
         "off_by_1_accuracy": off_by_1,
     }
-
-
-def build_model(params):
-    """Builds the MLP."""
-    sizes = (256, 128, 64)
-    hidden = sizes[:params["num_layers"]]
-
-    return MLP(hidden=hidden)
-
-
-def train(params):
-    """Trains the MLP."""
-    x_train, y_train, _ = load_data(TRAIN_EMBED_PATH, TRAIN_META_PATH)
-    x_val, y_val, _ = load_data(VAL_EMBED_PATH, VAL_META_PATH)
-
-    model = build_model(params)
-
-    model.fit(
-        x_train, y_train,
-        x_val, y_val,
-        params["lr"], params["weight_decay"], params["batch_size"], params["epochs"],
-        MODEL_SAVE_PATH,
-    )
 
 
 def scores_to_classes(scores, cutoffs):
@@ -123,6 +108,31 @@ def find_cutoffs(scores, y):
     result = minimize(qwk_loss, start, args=(scores, y), method="Nelder-Mead")
 
     return np.sort(result.x)
+
+
+# Training and testing
+def build_model(params):
+    """Builds the MLP."""
+    sizes = (256, 128, 64)
+    hidden = sizes[:params["num_layers"]]
+
+    return MLP(hidden=hidden)
+
+
+def train(params):
+    """Trains the MLP."""
+    x_train, y_train, _ = load_data(TRAIN_EMBED_PATH, TRAIN_META_PATH)
+    x_val, y_val, _ = load_data(VAL_EMBED_PATH, VAL_META_PATH)
+
+    model = build_model(params)
+
+    model.fit(
+        x_train, y_train,
+        x_val, y_val,
+        compute_qwk,
+        params["lr"], params["weight_decay"], params["batch_size"], params["epochs"],
+        MODEL_SAVE_PATH,
+    )
 
 
 def evaluate(params):
