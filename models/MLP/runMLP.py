@@ -147,6 +147,7 @@ def evaluate(params):
     rating_pred = test_scores + 1
     mae = np.abs(rating_pred - ratings).mean()
 
+    # F1 per class
     f1_each = f1_score(y_test, y_pred, average=None, labels=CLASSES, zero_division=0)
     print("F1 per class:", f1_each.round(3))
 
