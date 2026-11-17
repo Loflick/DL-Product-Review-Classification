@@ -17,7 +17,7 @@ python preprocessing/downloadData.py
 ```
 python preprocessing/updatedEmbed.py
 ```
-`updatedEmbed.py` embeds each review (title and text) with BGE and the sentiment model.
+`updatedEmbed.py` embeds each review with BGE and the sentiment model.
 
 ### Generated files
 | Split | Items | Reviews | Embeddings | Metadata |
@@ -37,7 +37,7 @@ Run each one from the repo root after steps 1 and 2.
 | Model | Files | Run |
 |---|---|---|
 | MLP | `models/MLP/MLP.py` is the model, `models/MLP/runMLP.py` loads data, trains and tests | `python models/MLP/runMLP.py` |
-| Transformer | `models/transformer/transformer.py` is the model, trainer and tester | `python models/transformer/transformer.py` |
 | CNN | `models/CNN/CNN.py` is the model, `models/CNN/trainCNN.py` loads data, trains and tests | `python models/CNN/trainCNN.py` |
 | LSTM | `models/LSTM/LSTM.py` is the model, `models/LSTM/runLSTM.py` loads data, trains and tests | `python models/LSTM/runLSTM.py` |
+| Transformer | `models/transformer/transformer.py` is the model, trains and tests | `python models/transformer/transformer.py` |
 
