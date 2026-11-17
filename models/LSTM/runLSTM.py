@@ -1,17 +1,4 @@
-"""Trains and evaluates the Bi-LSTM.
-
-Run from anywhere:
-    python models/LSTM/runLSTM.py                  # random search, then final 3-seed run + test
-    python models/LSTM/runLSTM.py --trials 0       # skip search; final run with the best saved config
-                                                   # (or the slide baseline if nothing is saved)
-
-Reads {train,validation,test}_embeds.npy and *_meta.npz from the repo root.
-
-Evaluation matches models/transformer/transformer.py so results are comparable:
-MAE is on the continuous rating score vs the item's float rating, classes are
-round(rating) in 1..5, and class cutoffs are tuned on validation (QWK + 0.8 * macro-F1)
-and then applied to test. The test set is only used once, at the end.
-"""
+"""Runs LSTM training and testing."""
 
 import argparse
 import copy
@@ -40,7 +27,7 @@ MODEL_SAVE_PATH = HERE / "lstm_bge_sent.pth"
 CLASSES = np.arange(1, NUM_CLASSES + 1)
 CUTOFF_F1_WEIGHT = 0.8
 
-# Slide baseline: 1 Bi-LSTM layer, 128 hidden per direction (256 combined)
+# Baseline settings
 BASELINE = {
     "hidden": 128, "d_in": 256, "num_layers": 1, "attn_heads": 4, "dropout": 0.2,
     "lr": 1e-3, "weight_decay": 1e-2, "batch_size": 256, "epochs": 20,
@@ -54,26 +41,24 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 
-# ----------------------------------------------------------------------
-# Data
-# ----------------------------------------------------------------------
+# Data loading
 def load_split(name):
     meta = np.load(ROOT / f"{name}_meta.npz")
-    x = torch.from_numpy(np.load(ROOT / f"{name}_embeds.npy"))            # float16, (N, 10, 773)
+    x = torch.from_numpy(np.load(ROOT / f"{name}_embeds.npy"))
     counts = torch.from_numpy(meta["counts"].astype(np.int64))
     ratings = meta["targets"].astype(np.float32)
     return x, counts, ratings
 
 
 def hard_class(r):
-    """Float rating -> class index 0..4 (round to nearest star, as the other models do)."""
+    """Rating to class."""
     return torch.clamp(torch.round(r) - 1, 0, NUM_CLASSES - 1).long()
 
 
 def soft_targets(r):
-    """Spread probability between the two nearest stars, e.g. 4.3 -> 70% '4', 30% '5'."""
+    """Split between nearest stars."""
     r = r.clamp(1.0, 5.0)
-    lo = torch.floor(r).long().clamp(max=NUM_CLASSES - 1)                  # 1..4
+    lo = torch.floor(r).long().clamp(max=NUM_CLASSES - 1)
     frac = (r - lo.float()).unsqueeze(1)
     t = torch.zeros(len(r), NUM_CLASSES, device=r.device)
     t.scatter_(1, (lo - 1).unsqueeze(1), 1 - frac)
@@ -82,7 +67,7 @@ def soft_targets(r):
 
 
 def shuffle_reviews(x, counts):
-    """Random order of each item's real reviews; padding stays at the end."""
+    """Shuffle real reviews."""
     B, L = x.shape[:2]
     t = torch.arange(L, device=x.device).unsqueeze(0).expand(B, L)
     keys = torch.where(t < counts.unsqueeze(1), torch.rand(B, L, device=x.device), 1.0 + t.float())
@@ -90,9 +75,7 @@ def shuffle_reviews(x, counts):
     return x.gather(1, idx.unsqueeze(-1).expand_as(x))
 
 
-# ----------------------------------------------------------------------
-# Metrics (same definitions as models/transformer/transformer.py)
-# ----------------------------------------------------------------------
+# Metrics
 def cutoff_objective(y, pred, f1_weight=CUTOFF_F1_WEIGHT):
     qwk = cohen_kappa_score(y, pred, weights="quadratic")
     return qwk + f1_weight * f1_score(y, pred, labels=CLASSES, average="macro", zero_division=0)
@@ -135,12 +118,9 @@ def selection_score(m):
     return m["QWK"] - m["MAE"]
 
 
-# ----------------------------------------------------------------------
-# Training
-# ----------------------------------------------------------------------
 @torch.no_grad()
 def predict(model, data, batch_size=1024):
-    """Returns (expected star from class probs, regression rating), both numpy (N,)."""
+    """Expected star and rating."""
     model.eval()
     x, counts, _ = data
     ev, reg = [], []
@@ -159,7 +139,7 @@ def blend(ev, reg, alpha):
 
 
 def best_blend(ev, reg, ratings):
-    """Pick how to mix the two outputs on validation."""
+    """Best mix on validation."""
     best = None
     for alpha in (0.0, 0.25, 0.5, 0.75, 1.0):
         m = compute_metrics(blend(ev, reg, alpha), ratings)
@@ -173,7 +153,7 @@ def train(p, train_data, val_data, seed=0, patience=4, verbose=True):
     x_tr, c_tr, r_tr = train_data
     r_tr_t = torch.from_numpy(r_tr)
 
-    # Optional per-item weights from class frequency
+    # Class weights
     cls = hard_class(r_tr_t)
     freq = torch.bincount(cls, minlength=NUM_CLASSES).float()
     class_w = ((freq.sum() / freq.clamp(min=1)) ** p["class_weight_power"]).clamp(max=20.0)
@@ -241,9 +221,7 @@ def train(p, train_data, val_data, seed=0, patience=4, verbose=True):
     return model, {"val_score": best[0], "alpha": best[2], "best_epoch": best[3]}
 
 
-# ----------------------------------------------------------------------
-# Search and final evaluation
-# ----------------------------------------------------------------------
+# Search and testing
 def sample_params(rng):
     return {
         "hidden": int(rng.choice([128, 192, 256])),
@@ -280,15 +258,15 @@ def print_results(title, m, n):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--trials", type=int, default=12, help="random-search trials (baseline counts as one)")
-    ap.add_argument("--seeds", type=int, default=3, help="seeds for the final run")
+    ap.add_argument("--trials", type=int, default=12, help="search trials")
+    ap.add_argument("--seeds", type=int, default=3, help="final seeds")
     args = ap.parse_args()
 
     print(f"Device: {DEVICE} | data: {ROOT}")
     train_data, val_data = load_split("train"), load_split("validation")
     print(f"Train {len(train_data[0])} | Val {len(val_data[0])} items", flush=True)
 
-    # ---- random search (resumable) ----
+    # Random search
     results = load_results()
     rng = np.random.default_rng(0)
     planned = [BASELINE] + [sample_params(rng) for _ in range(max(0, args.trials - 1))]
@@ -309,7 +287,7 @@ def main():
             print(f"  {r['val_score']:.4f}  {r['params']}")
     best_p = results[0]["params"] if results else BASELINE
 
-    # ---- final: several seeds with the best config ----
+    # Final seeds
     print(f"\nFinal config: {best_p}", flush=True)
     runs = []
     for seed in range(args.seeds):
@@ -323,7 +301,7 @@ def main():
     torch.save({"params": best_p, "alpha": best_run["alpha"], "state": best_run["model"].state_dict()},
                MODEL_SAVE_PATH)
 
-    # ---- test, once ----
+    # Test
     del train_data
     test_data = load_split("test")
     y_val = np.round(val_data[2]).astype(int)

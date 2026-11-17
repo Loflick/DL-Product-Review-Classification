@@ -1,21 +1,6 @@
-"""Bi-LSTM model for product review classification.
-
-Each item is a sequence of up to 10 review vectors (768 BGE values + 5 sentiment
-probabilities). The model reads that sequence with a bidirectional LSTM, mixes
-the reviews with self-attention, pools them into one item vector, and predicts
-both the star class (5 logits) and the item's average rating (a float).
-
-    reviews (B, 10, 773)
-      -> project BGE and sentiment parts, add                  (B, 10, d_in)
-      -> Bi-LSTM, padding-aware                                (B, 10, 2*hidden)
-      -> self-attention across reviews + residual + LayerNorm  (B, 10, 2*hidden)
-      -> masked mean, masked max and attention pooling         (B, 3*2*hidden)
-      -> + item-level sentiment statistics                     (B, 3*2*hidden + 10)
-      -> MLP head -> class logits (B, 5) and rating (B,)
-"""
+"""Bi-LSTM for review classification."""
 
 import math
-
 import torch
 import torch.nn as nn
 
@@ -23,15 +8,11 @@ BGE_DIM = 768
 SENT_DIM = 5
 EMBED_DIM = BGE_DIM + SENT_DIM
 NUM_CLASSES = 5
-NUM_STATS = 10  # 5 mean sentiment probs, mean/std/min/max expected star, log review count
+NUM_STATS = 10
 
 
 def reverse_valid(x, counts):
-    """Reverse the first counts[i] steps of each row and leave the padding in place.
-
-    Applying it twice gives back the original order, so the same function maps the
-    backward LSTM's input and output.
-    """
+    """Reverse real reviews, keep padding."""
     B, L = x.shape[:2]
     t = torch.arange(L, device=x.device).unsqueeze(0).expand(B, L)
     c = counts.unsqueeze(1)
@@ -48,8 +29,7 @@ class ReviewLSTM(nn.Module):
         self.sent_norm = nn.LayerNorm(d_in)
         self.in_drop = nn.Sequential(nn.GELU(), nn.Dropout(dropout))
 
-        # Two one-directional LSTMs form the Bi-LSTM. The backward one reads each item's
-        # real reviews in reverse, so padding never feeds into a real review's state.
+        # Forward and backward LSTM
         lstm_drop = dropout if num_layers > 1 else 0.0
         self.fwd = nn.LSTM(d_in, hidden, num_layers, batch_first=True, dropout=lstm_drop)
         self.bwd = nn.LSTM(d_in, hidden, num_layers, batch_first=True, dropout=lstm_drop)
@@ -67,18 +47,18 @@ class ReviewLSTM(nn.Module):
         self.reg_out = nn.Linear(256, 1)
 
     def forward(self, x, counts):
-        """x: (B, L, 773) float, counts: (B,) long. Returns (logits (B, 5), rating (B,))."""
+        """Class scores and rating."""
         B, L, _ = x.shape
         counts = counts.clamp(min=1)
-        mask = torch.arange(L, device=x.device).unsqueeze(0) < counts.unsqueeze(1)  # True = real review
+        mask = torch.arange(L, device=x.device).unsqueeze(0) < counts.unsqueeze(1)
         mask_f = mask.unsqueeze(-1).float()
-        n = mask_f.sum(1)                                                            # (B, 1)
+        n = mask_f.sum(1)
 
         bge, sent = x[..., :BGE_DIM], x[..., BGE_DIM:]
         stars = torch.arange(1, 6, device=x.device, dtype=x.dtype)
-        star = (sent * stars).sum(-1, keepdim=True)                                  # expected star per review
+        star = (sent * stars).sum(-1, keepdim=True)
 
-        # Item-level sentiment statistics over the real reviews
+        # Sentiment summary
         mean_sent = (sent * mask_f).sum(1) / n
         mean_star = (star * mask_f).sum(1) / n
         std_star = torch.sqrt((((star - mean_star.unsqueeze(1)) ** 2) * mask_f).sum(1) / n + 1e-6)
@@ -95,7 +75,7 @@ class ReviewLSTM(nn.Module):
         # Bi-LSTM
         out_f, _ = self.fwd(h)
         out_b, _ = self.bwd(reverse_valid(h, counts))
-        h = torch.cat([out_f, reverse_valid(out_b, counts)], dim=-1) * mask_f       # (B, L, 2*hidden)
+        h = torch.cat([out_f, reverse_valid(out_b, counts)], dim=-1) * mask_f
 
         # Self-attention across reviews
         a, _ = self.attn(h, h, h, key_padding_mask=~mask, need_weights=False)
@@ -109,5 +89,5 @@ class ReviewLSTM(nn.Module):
 
         z = self.head(torch.cat([mean_pool, max_pool, attn_pool, stats], dim=-1))
         logits = self.cls_out(z)
-        rating = (mean_star + self.reg_out(z)).squeeze(-1)                           # residual on mean sentiment star
+        rating = (mean_star + self.reg_out(z)).squeeze(-1)
         return logits, rating
