@@ -39,4 +39,5 @@ Run each one from the repo root after steps 1 and 2.
 | MLP | `models/MLP/MLP.py` is the model, `models/MLP/runMLP.py` loads data, trains and tests | `python models/MLP/runMLP.py` |
 | Transformer | `models/transformer/transformer.py` is the model, trainer and tester | `python models/transformer/transformer.py` |
 | CNN | `models/CNN/CNN.py` is the model, `models/CNN/trainCNN.py` loads data, trains and tests | `python models/CNN/trainCNN.py` |
-| LSTM | `models/LSTM/LSTM.py` is the model, `models/LSTM/runLSTM.py` runs the random search, trains and tests | `python models/LSTM/runLSTM.py` |
+| LSTM | `models/LSTM/LSTM.py` is the model, `models/LSTM/runLSTM.py` loads data, trains and tests | `python models/LSTM/runLSTM.py` |
+
